@@ -4,13 +4,17 @@ import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Path;
+import android.graphics.drawable.Drawable;
 import android.view.View;
 
 import java.util.Locale;
 
 /**
- * A pointy-top hexagon tile for the honeycomb: channel code, app name and a brand-colored dot. Emblems show on
- * the main panels only; the honeycomb keeps the names.
+ * A pointy-top hexagon tile for the honeycomb: channel code, app name and a brand-colored dot.
+ *
+ * LOCAL FORK (homelab): upstream draws emblems on the main panels only. Here the hex draws the app's
+ * emblem too, tinted with the app's own colour (dark when focused, matching the code and name), and the
+ * dot bar falls back in only for apps that have no emblem bundled.
  */
 final class HexView extends View {
     final Kido.Look look;
@@ -21,11 +25,13 @@ final class HexView extends View {
     private final Paint namePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint dot = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path outer = new Path(), inner = new Path();
+    private final Drawable emblem;
 
     HexView(Context c, Kido.Look look, String code) {
         super(c);
         this.look = look;
         this.code = code;
+        this.emblem = look.emblem != 0 ? c.getDrawable(look.emblem) : null;
         setFocusable(true);
         setClickable(true);
         codePaint.setTypeface(Kido.mono);
@@ -69,10 +75,12 @@ final class HexView extends View {
         c.drawPath(outer, rim);
         c.drawPath(inner, fill);
 
+        boolean hasEmblem = emblem != null;
         float w = getWidth(), h = getHeight();
+
         codePaint.setColor(f ? 0xFF1A0D00 : Kido.DIM);
         codePaint.setTextSize(Kido.px(22));
-        c.drawText(code, w / 2, h * 0.36f, codePaint);
+        c.drawText(code, w / 2, h * (hasEmblem ? 0.30f : 0.36f), codePaint);
 
         // Fit the name: one line, shrinking long names rather than wrapping.
         String name = look.name.toUpperCase(Locale.ROOT);
@@ -82,7 +90,25 @@ final class HexView extends View {
         float width = namePaint.measureText(name);
         if (width > max) namePaint.setTextSize(size * max / width);
         namePaint.setColor(f ? Kido.DARK_TEXT : Kido.CREAM);
-        c.drawText(name, w / 2, h * 0.57f, namePaint);
+        c.drawText(name, w / 2, h * (hasEmblem ? 0.74f : 0.57f), namePaint);
+
+        if (hasEmblem) {
+            // Emblem sits centred in the wide part of the hex, above the name.
+            float ih = emblem.getIntrinsicHeight(), iw = emblem.getIntrinsicWidth();
+            if (ih <= 0 || iw <= 0) return;
+            float bh = h * 0.26f, bw = bh * iw / ih;
+            float bmax = w * 0.64f;
+            if (bw > bmax) {
+                bw = bmax;
+                bh = bw * ih / iw;
+            }
+            float cy = h * 0.52f;
+            emblem.setBounds(Math.round(w / 2 - bw / 2), Math.round(cy - bh / 2),
+                    Math.round(w / 2 + bw / 2), Math.round(cy + bh / 2));
+            emblem.setTint(f ? Kido.DARK_TEXT : look.glow);
+            emblem.draw(c);
+            return;
+        }
 
         if (f) {
             dot.setColor(0xFF120800);
