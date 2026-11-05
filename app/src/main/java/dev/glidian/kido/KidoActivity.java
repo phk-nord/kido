@@ -127,10 +127,14 @@ public class KidoActivity extends Activity {
     private TextView hiveMore;
     private final List<View> sysViews = new ArrayList<>();
     private final List<App> netApps = new ArrayList<>();
+    // LOCAL FORK: channel number -> app, so the remote's number keys can tune a channel.
+    private final java.util.Map<String, App> appsByCh = new java.util.LinkedHashMap<>();
 
     private FrameLayout alert, boot;
     private View scan;
     private TextView alertDetail, ticker, dataLabels, dataValues;
+    /** LOCAL FORK: what the footer says about the focused tile, kept out of the rolling log. */
+    private String focusLabel = "";
     // NOW PLAYING: an opt-in panel that takes the data block's place while something plays.
     private NowPlaying nowPlaying;
     private FrameLayout npPanel;
@@ -257,8 +261,15 @@ public class KidoActivity extends Activity {
             return ia - ib;
         });
         int n = 1;
-        for (App a : favs) a.ch = String.format(Locale.ROOT, "%02d", n++);
-        for (App a : rest) a.ch = String.format(Locale.ROOT, "%02d", n++);
+        appsByCh.clear();
+        for (App a : favs) {
+            a.ch = String.format(Locale.ROOT, "%02d", n++);
+            appsByCh.put(a.ch, a);
+        }
+        for (App a : rest) {
+            a.ch = String.format(Locale.ROOT, "%02d", n++);
+            appsByCh.put(a.ch, a);
+        }
 
         buildMain(zone(0), favs);
         buildNetwork(zone(1), rest);
@@ -716,7 +727,8 @@ public class KidoActivity extends Activity {
         glow = new View(this);
         glowBg = new GradientDrawable();
         glowBg.setGradientType(GradientDrawable.RADIAL_GRADIENT);
-        glowBg.setGradientRadius(Kido.px(560));
+        glowBg.setGradientRadius(Kido.px(460));   // LOCAL FORK: fits inside the 1000-tall view, so the
+                                                  // radial falloff ends before the view edge clips it
         glowBg.setColors(new int[]{Kido.withAlpha(plateColor, 0.34f), 0x00000000});
         glow.setBackground(glowBg);
         place(hud, glow, 880, -320, 1300, 1000);
@@ -1036,8 +1048,16 @@ public class KidoActivity extends Activity {
 
     private void showStatus(View v) {
         Item item = (Item) v.getTag();
-        if (item.app != null) log(str(R.string.log_focus, "CH." + item.app.ch + " " + item.app.look.name.toUpperCase(Locale.ROOT)));
-        else if (item.status != null) log(str(R.string.log_focus, item.status[2]));
+        // LOCAL FORK: the selection is its own footer field. Upstream pushed it into the 3-line log ring,
+        // where the SYS-CHK heartbeat evicted it after a few seconds and a late write made the footer
+        // show the previous tile. Now it is set from the tile that actually has focus.
+        String label = item.app != null
+                ? "CH." + item.app.ch + " " + item.app.look.name.toUpperCase(Locale.ROOT)
+                : item.status != null ? item.status[2] : "";
+        if (!label.equals(focusLabel)) {
+            focusLabel = label;
+            renderTicker();
+        }
         if (item.app != null) {
             App a = item.app;
             setStatus(a.look.kanji, a.look.category, a.look.name.toUpperCase(Locale.ROOT) + " // CH." + a.ch, str(R.string.ready), a.look.glow);
@@ -1067,8 +1087,10 @@ public class KidoActivity extends Activity {
         GlowView g = zoneGlow[item.zone];
         FrameLayout.LayoutParams vp = (FrameLayout.LayoutParams) v.getLayoutParams();
         FrameLayout.LayoutParams gp = (FrameLayout.LayoutParams) g.getLayoutParams();
-        int pad = Kido.px(item.zone == 1 ? 40 : 34);
+        int pad = Kido.px(88);   // LOCAL FORK: room for the full 44 px blur (was 34/40, which clipped it)
         int lift = item.zone == 1 ? 0 : Kido.px(12);
+        g.setPad(pad);
+        g.setSpread(1f);
         if (gp.width != vp.width + pad * 2 || gp.height != vp.height + pad * 2) {
             gp.width = vp.width + pad * 2;
             gp.height = vp.height + pad * 2;
@@ -1231,6 +1253,73 @@ public class KidoActivity extends Activity {
 
     // ---------------------------------------------------------------- actions
 
+    // ------------------------------------------------------- channel recall (local fork)
+
+    /** Digits typed on the remote, cleared after a pause. CH+ / CH- tunes to the typed number. */
+    private final StringBuilder chanBuf = new StringBuilder();
+    private String chanTickerBackup;
+
+    private final Runnable chanExpire = () -> {
+        chanBuf.setLength(0);
+        if (chanTickerBackup != null) {
+            ticker.setText(chanTickerBackup);
+            chanTickerBackup = null;
+        }
+    };
+
+    private static int digitOf(int keyCode) {
+        if (keyCode >= KeyEvent.KEYCODE_0 && keyCode <= KeyEvent.KEYCODE_9) {
+            return keyCode - KeyEvent.KEYCODE_0;
+        }
+        if (keyCode >= KeyEvent.KEYCODE_NUMPAD_0 && keyCode <= KeyEvent.KEYCODE_NUMPAD_9) {
+            return keyCode - KeyEvent.KEYCODE_NUMPAD_0;
+        }
+        return -1;
+    }
+
+    /** True when the event was consumed: a digit, or CH+ / CH- while a number is typed. */
+    private boolean handleChannelKey(KeyEvent e) {
+        int k = e.getKeyCode();
+        int digit = digitOf(k);
+        if (digit >= 0) {
+            if (e.getAction() == KeyEvent.ACTION_DOWN && e.getRepeatCount() == 0) {
+                if (chanBuf.length() >= 2) chanBuf.setLength(0);
+                chanBuf.append((char) ('0' + digit));
+                showChannelTyped();
+            }
+            return true;
+        }
+        if (k == KeyEvent.KEYCODE_CHANNEL_UP || k == KeyEvent.KEYCODE_CHANNEL_DOWN) {
+            if (e.getAction() == KeyEvent.ACTION_DOWN && chanBuf.length() > 0) {
+                tuneChannel(Integer.parseInt(chanBuf.toString()));
+                return true;
+            }
+            return false;   // nothing typed: leave the key alone, as before
+        }
+        return false;
+    }
+
+    private void showChannelTyped() {
+        if (chanTickerBackup == null) chanTickerBackup = String.valueOf(ticker.getText());
+        App target = appsByCh.get(String.format(Locale.ROOT, "%02d", Integer.parseInt(chanBuf.toString())));
+        ticker.setText("CH " + chanBuf
+                + (target != null ? " // " + target.look.name.toUpperCase(Locale.ROOT) : " // NO CHANNEL")
+                + " // PRESS CH");
+        handler.removeCallbacks(chanExpire);
+        handler.postDelayed(chanExpire, 4000);
+    }
+
+    private void tuneChannel(int n) {
+        App target = appsByCh.get(String.format(Locale.ROOT, "%02d", n));
+        chanBuf.setLength(0);
+        handler.removeCallbacks(chanExpire);
+        if (chanTickerBackup != null) {
+            ticker.setText(chanTickerBackup);
+            chanTickerBackup = null;
+        }
+        if (target != null) launch(target);
+    }
+
     private void launch(App app) {
         launch.removeAllViews();
         int glowColor = app.look.glow;
@@ -1384,6 +1473,8 @@ public class KidoActivity extends Activity {
             idle = false;
             if (lastFocused != null && getCurrentFocus() != npPanel) focused(lastFocused);
         }
+        // LOCAL FORK: type a channel number, then CH+ / CH- tunes to it.
+        if (handleChannelKey(event)) return true;
         if (alert.getVisibility() == View.VISIBLE) {
             int k = event.getKeyCode();
             boolean ok = k == KeyEvent.KEYCODE_DPAD_CENTER || k == KeyEvent.KEYCODE_ENTER;
@@ -1971,6 +2062,7 @@ public class KidoActivity extends Activity {
             if (SystemClock.uptimeMillis() - lastLogAt > 6000) {
                 log(str(R.string.sys_check_log, ++sysCheck, new Random().nextInt(0x10000)));
             }
+            renderTicker();   // LOCAL FORK: keep the footer clock and the selection readout live
             handler.postDelayed(this, 1000);
         }
     };
@@ -1983,18 +2075,39 @@ public class KidoActivity extends Activity {
         renderTicker();
     }
 
-    /** The footer: a live clock (it ticks every second, like the big one) and the latest log lines after it. */
+    /** The footer: a live clock, the focused selection, then the latest log line — measured to fit. */
     private void renderTicker() {
         if (ticker == null) return;
-        SpannableStringBuilder sb = new SpannableStringBuilder();
+        // LOCAL FORK: while a channel number is being typed, the ticker belongs to that readout.
+        if (chanBuf.length() > 0) return;
         String now = new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date());
+        String sel = focusLabel;
+        String latest = logLines.isEmpty() ? "" : logLines.get(0);
+        android.graphics.Paint p = ticker.getPaint();
+        float max = ticker.getWidth() > 0 ? ticker.getWidth() : Kido.px(860);
+        String head = "   ▶ " + sel;
+        String tail = latest.isEmpty() ? "" : "   //   " + latest;
+        // Drop the log line before shortening the selection, and shorten the selection before it runs off the edge.
+        if (p.measureText(now + head + tail) > max) tail = "";
+        if (!sel.isEmpty() && p.measureText(now + head) > max) {
+            while (sel.length() > 1 && p.measureText(now + "   ▶ " + sel + "…") > max) {
+                sel = sel.substring(0, sel.length() - 1);
+            }
+            sel = sel.trim() + "…";
+        }
+        SpannableStringBuilder sb = new SpannableStringBuilder();
         sb.append(now);
         sb.setSpan(new ForegroundColorSpan(Kido.AMBER), 0, sb.length(), 0);
-        for (int i = 0; i < logLines.size(); i++) {
-            sb.append(i == 0 ? "  " : "   //   ");
+        if (!sel.isEmpty()) {
+            sb.append("   ▶ ");
             int start = sb.length();
-            sb.append(logLines.get(i));
-            if (i == 0) sb.setSpan(new ForegroundColorSpan(Kido.INK), start, sb.length(), 0);
+            sb.append(sel);
+            sb.setSpan(new ForegroundColorSpan(Kido.INK), start, sb.length(), 0);
+        }
+        if (!tail.isEmpty()) {
+            int start = sb.length();
+            sb.append(tail);
+            sb.setSpan(new ForegroundColorSpan(Kido.DIM), start, sb.length(), 0);
         }
         ticker.setText(sb);
     }
