@@ -245,6 +245,13 @@ final class Kido {
             // Philips
             "org.droidtv.demome",
             "com.Smartdevice.emanual",
+            // Philips / TP Vision e-manual: shows as "HOW TO..." on a 50PUS7334 (PH9M_EA_5599).
+            // Local addition, not in upstream v0.2.
+            "org.droidtv.eum",
+            // Streaming-only set (no aerial): the tuner front-end and the channel list are dead tiles.
+            // Both packages stay ENABLED - playtv is what opens the HDMI/AV inputs.
+            "org.droidtv.playtv",
+            "org.droidtv.channels",
     };
 
     /**
